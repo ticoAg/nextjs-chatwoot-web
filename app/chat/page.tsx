@@ -26,6 +26,31 @@ function toMillis(ts: any): number {
     return Date.now();
 }
 
+function mapMessageType(raw: any, sender: any): "incoming" | "outgoing" | "activity" | "template" {
+    let t: string = "text";
+    if (typeof raw === "number") {
+        // Chatwoot sometimes uses numeric enums: 0=incoming, 1=outgoing, 2=activity
+        t = raw === 0 ? "incoming" : raw === 1 ? "outgoing" : raw === 2 ? "activity" : "text";
+    } else if (typeof raw === "string") {
+        // Handle stringified numbers and proper strings
+        if (raw === "0") t = "incoming";
+        else if (raw === "1") t = "outgoing";
+        else if (raw === "2") t = "activity";
+        else t = raw as any;
+    }
+    const role = (sender && (sender.role as string)) || "";
+    const type = (sender && (sender.type as string)) || ""; // e.g., "contact" for visitors
+    const isAgent = role === "agent" || role === "administrator";
+    const isContact = type === "contact";
+    // If a contact (visitor) message is marked as outgoing, treat it as incoming for the widget
+    if (isContact && t === "outgoing") return "incoming";
+    // If an agent message is marked as incoming, treat it as outgoing
+    if (isAgent && t === "incoming") return "outgoing";
+    // Default
+    if (t === "text") return "incoming"; // safest default for user view
+    return t as any;
+}
+
 // Client-side fetch helpers for our server API wrappers
 const bootChat = async (contactIdentifier?: string) => {
 	const res = await fetch("/api/chat/boot", {
@@ -90,13 +115,7 @@ function normalizePublic(msg: public_message): DisplayMessage {
     );
     // Some client API responses may mark contact-sent messages as "outgoing" but
     // without a sender object; normalize those to "incoming" for visitor view.
-    const rawType = (msg.message_type as any) || "text";
-    const hasSender = !!anyMsg.sender;
-    const message_type = hasSender
-        ? rawType
-        : rawType === "outgoing"
-        ? "incoming"
-        : rawType;
+    const message_type = mapMessageType((msg as any).message_type, anyMsg.sender);
     return {
         id,
         content: msg.content,
@@ -115,11 +134,12 @@ function normalizeCable(msg: CableMessage): DisplayMessage {
     const fallbackId = `${anyMsg.conversation_id || ""}:${anyMsg.created_at || ""}:${
         anyMsg.content || ""
     }`;
+    const message_type = mapMessageType((anyMsg as any).message_type, anyMsg.sender);
     return {
         id: String(stableId || fallbackId || Date.now()),
         content: anyMsg.content,
         content_type: anyMsg.content_type,
-        message_type: anyMsg.message_type,
+        message_type,
         attachments: anyMsg.attachment ? [anyMsg.attachment] : [],
         created_at: toMillis(anyMsg.created_at),
         conversation_id: anyMsg.conversation_id,
@@ -379,9 +399,9 @@ export default function ChatPage() {
 }
 
 function MessageItem({ msg, onQuickReply }: { msg: DisplayMessage; onQuickReply?: (text: string) => void }) {
-    // Treat messages without sender as user's own; activity is system
-    const isMine = !msg.sender && msg.message_type !== "activity";
     const isActivity = msg.message_type === "activity";
+    const senderType = (msg as any)?.sender?.type as string | undefined;
+    const isMine = !isActivity && (senderType === "contact" || msg.message_type === "incoming");
     const bubbleClass = isActivity
         ? "bg-zinc-100 text-zinc-700"
         : isMine
