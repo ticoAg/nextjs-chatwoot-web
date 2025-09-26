@@ -10,6 +10,22 @@ import type {
 	message as CableMessage,
 } from "@figuro/chatwoot-sdk/dist";
 
+function toMillis(ts: any): number {
+    if (ts == null) return Date.now();
+    if (typeof ts === "number") {
+        return ts < 1e12 ? ts * 1000 : ts;
+    }
+    if (typeof ts === "string") {
+        const n = Number(ts);
+        if (!Number.isNaN(n)) {
+            return n < 1e12 ? n * 1000 : n;
+        }
+        const parsed = Date.parse(ts);
+        return Number.isNaN(parsed) ? Date.now() : parsed;
+    }
+    return Date.now();
+}
+
 // Client-side fetch helpers for our server API wrappers
 const bootChat = async (contactIdentifier?: string) => {
 	const res = await fetch("/api/chat/boot", {
@@ -56,39 +72,59 @@ type BootState = {
 };
 
 type DisplayMessage = {
-	id: string;
-	content?: string;
-	content_type?: "text" | "input_select" | "cards" | "form";
-	message_type?: "incoming" | "outgoing" | "activity" | "template";
-	created_at?: number;
-	attachments?: Array<any>;
-	conversation_id?: string | number;
+    id: string;
+    content?: string;
+    content_type?: "text" | "input_select" | "cards" | "form";
+    message_type?: "incoming" | "outgoing" | "activity" | "template";
+    created_at?: number;
+    attachments?: Array<any>;
+    conversation_id?: string | number;
+    sender?: any;
 };
 
 function normalizePublic(msg: public_message): DisplayMessage {
-	return {
-		id: String(msg.id || msg.conversation_id || Date.now()),
-		content: msg.content,
-		content_type: msg.content_type as any,
-		message_type: msg.message_type as any,
-		attachments: msg.attachments || [],
-		created_at: msg.created_at
-			? new Date(msg.created_at).getTime()
-			: Date.now(),
-		conversation_id: msg.conversation_id,
-	};
+    const anyMsg = msg as any;
+    // Prefer source_id for dedupe across WS + HTTP responses
+    const id = String(
+        anyMsg.source_id || msg.id || msg.conversation_id || Date.now()
+    );
+    // Some client API responses may mark contact-sent messages as "outgoing" but
+    // without a sender object; normalize those to "incoming" for visitor view.
+    const rawType = (msg.message_type as any) || "text";
+    const hasSender = !!anyMsg.sender;
+    const message_type = hasSender
+        ? rawType
+        : rawType === "outgoing"
+        ? "incoming"
+        : rawType;
+    return {
+        id,
+        content: msg.content,
+        content_type: (msg.content_type as any) || "text",
+        message_type,
+        attachments: msg.attachments || [],
+        created_at: toMillis(anyMsg.created_at),
+        conversation_id: msg.conversation_id,
+        sender: anyMsg.sender,
+    };
 }
 
 function normalizeCable(msg: CableMessage): DisplayMessage {
-	return {
-		id: String(msg.source_id || Date.now()),
-		content: msg.content,
-		content_type: msg.content_type,
-		message_type: msg.message_type,
-		attachments: msg.attachment ? [msg.attachment] : [],
-		created_at: msg.created_at ?? Date.now(),
-		conversation_id: msg.conversation_id,
-	};
+    const anyMsg = msg as any;
+    const stableId = anyMsg.source_id || anyMsg.id;
+    const fallbackId = `${anyMsg.conversation_id || ""}:${anyMsg.created_at || ""}:${
+        anyMsg.content || ""
+    }`;
+    return {
+        id: String(stableId || fallbackId || Date.now()),
+        content: anyMsg.content,
+        content_type: anyMsg.content_type,
+        message_type: anyMsg.message_type,
+        attachments: anyMsg.attachment ? [anyMsg.attachment] : [],
+        created_at: toMillis(anyMsg.created_at),
+        conversation_id: anyMsg.conversation_id,
+        sender: anyMsg.sender,
+    };
 }
 
 export default function ChatPage() {
@@ -170,10 +206,11 @@ export default function ChatPage() {
       setMessages((m) => [...m, optimistic]);
 
       const res = await sendMessage(contactIdentifier, conversationId, content);
-      if ((res as any)?.id) {
-        const canonical = normalizePublic(res as any);
-        setMessages((m) => m.map((msg) => (msg.id === echo_id ? canonical : msg)));
-      }
+      // If server echoes via WS, we might get a duplicate. Replace optimistic by matching echo_id/source_id.
+      const canonical = normalizePublic(res as any);
+      setMessages((m) =>
+        m.map((msg) => (msg.id === echo_id || msg.id === (res as any)?.source_id ? canonical : msg))
+      );
     } catch (e: any) {
       console.error(e);
       setError(e?.message || "发送失败");
@@ -228,12 +265,26 @@ export default function ChatPage() {
 								if (String(pubMsg.conversation_id || "") === convId)
 									dm = normalizePublic(pubMsg);
 							}
-							if (dm) {
-								setMessages((prev) => {
-									const exists = prev.some((m) => m.id === dm!.id);
-									return exists ? prev : [...prev, dm!];
-								});
-							} else {
+                        if (dm) {
+                            setMessages((prev) => {
+                                // Dedupe by id first
+                                const byId = prev.findIndex((m) => m.id === dm!.id);
+                                if (byId >= 0) return prev;
+                                // Dedupe/merge by content + timestamp proximity (handles echo_id vs source_id)
+                                const nearIdx = prev.findIndex((m) => {
+                                    const sameConv = String(m.conversation_id || "") === String(dm!.conversation_id || "");
+                                    const sameText = (m.content || "") === (dm!.content || "");
+                                    const dt = Math.abs((m.created_at || 0) - (dm!.created_at || 0));
+                                    return sameConv && sameText && dt < 5000; // within 5s window
+                                });
+                                if (nearIdx >= 0) {
+                                    const cloned = [...prev];
+                                    cloned[nearIdx] = dm!;
+                                    return cloned;
+                                }
+                                return [...prev, dm!];
+                            });
+                        } else {
 								// Fallback: refresh messages
 								const contactIdentifier = boot.contact?.source_id as string;
 								const msgs = await listMessages(contactIdentifier, convId);
@@ -263,22 +314,23 @@ export default function ChatPage() {
 		// eslint-disable-next-line react-hooks/exhaustive-deps
 	}, [boot.contact?.pubsub_token, boot.conversation?.id]);
 
-	// Poll for new messages every 5s (backup to WS)
-	useEffect(() => {
-		if (!boot.contact || !boot.conversation) return;
-		const contactIdentifier = boot.contact.source_id as string;
-		const conversationId = String(boot.conversation.id || "");
-		const t = setInterval(async () => {
-			try {
-				const msgs = await listMessages(contactIdentifier, conversationId);
-				setMessages((msgs || []).map(normalizePublic));
-			} catch (e) {
-				// ignore transient errors
-			}
-		}, 5000);
-		return () => clearInterval(t);
-		// eslint-disable-next-line react-hooks/exhaustive-deps
-	}, [boot.contact?.source_id, boot.conversation?.id]);
+    // Poll for new messages every 5s (backup to WS). Disable when WS is connected.
+    useEffect(() => {
+        if (!boot.contact || !boot.conversation) return;
+        if (wsStatus === "connected") return;
+        const contactIdentifier = boot.contact.source_id as string;
+        const conversationId = String(boot.conversation.id || "");
+        const t = setInterval(async () => {
+            try {
+                const msgs = await listMessages(contactIdentifier, conversationId);
+                setMessages((msgs || []).map(normalizePublic));
+            } catch (e) {
+                // ignore transient errors
+            }
+        }, 5000);
+        return () => clearInterval(t);
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [boot.contact?.source_id, boot.conversation?.id, wsStatus]);
 
 	return (
     <div className="mx-auto max-w-2xl w-full p-4 flex flex-col gap-4">
@@ -327,8 +379,8 @@ export default function ChatPage() {
 }
 
 function MessageItem({ msg, onQuickReply }: { msg: DisplayMessage; onQuickReply?: (text: string) => void }) {
-    // In Chatwoot semantics, messages created by the visitor (client API) are "incoming"
-    const isMine = msg.message_type === "incoming";
+    // Treat messages without sender as user's own; activity is system
+    const isMine = !msg.sender && msg.message_type !== "activity";
     const isActivity = msg.message_type === "activity";
     const bubbleClass = isActivity
         ? "bg-zinc-100 text-zinc-700"

@@ -4,7 +4,7 @@ import ChatwootClient, { ChatwootAPI } from "@figuro/chatwoot-sdk/dist";
 function getClient() {
   const basePath = process.env.base_url as string;
   const config = { ...ChatwootAPI, basePath, with_credentials: false };
-  return new ChatwootClient({ config });
+  return new ChatwootClient({ config }) as any;
 }
 
 export async function GET(req: NextRequest) {
@@ -48,4 +48,3 @@ export async function POST(req: NextRequest) {
     return new Response(JSON.stringify({ error: e?.message || "Create failed" }), { status: 500 });
   }
 }
-
