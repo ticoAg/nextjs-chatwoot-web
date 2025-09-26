@@ -41,7 +41,7 @@
 
 ### ✅ 允许的行为
 
-- **基于官方 SDK 生成代码**：优先使用 `@chatwoot/sdk` 而非手动调用 REST API
+- **基于官方 SDK 生成代码**：优先使用[Chatwoot 官方文档](docs/chatwoot/swagger/)定义的接口标准，次优使用 `@chatwoot/sdk`
 - **复用现有模式**：若项目已用 TypeScript，则新代码必须严格遵循类型定义
 - **环境变量隔离**：所有敏感配置（如 `websiteToken`）必须通过 `process.env.NEXT_PUBLIC_*` 注入
 - **错误边界处理**：为聊天组件添加 `ErrorBoundary` 并记录 `console.error`
