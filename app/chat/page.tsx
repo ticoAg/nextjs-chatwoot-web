@@ -1,6 +1,8 @@
 "use client";
 import { useEffect, useMemo, useRef, useState } from "react";
 import * as ActionCable from "@rails/actioncable";
+import { Input, Button, Tag, Typography } from "antd";
+const { Text } = Typography;
 import type {
 	public_contact,
 	public_conversation,
@@ -151,41 +153,39 @@ export default function ChatPage() {
 		scrollerRef.current.scrollTop = scrollerRef.current.scrollHeight;
 	}, [messages.length]);
 
-	const onSend = async () => {
-		if (!input.trim() || !boot.contact || !boot.conversation) return;
-		try {
-			const contactIdentifier = boot.contact.source_id as string;
-			const conversationId = String(boot.conversation.id || "");
-			const echo_id = `${Date.now()}`;
+  const sendContent = async (content: string) => {
+    if (!content.trim() || !boot.contact || !boot.conversation) return;
+    try {
+      const contactIdentifier = boot.contact.source_id as string;
+      const conversationId = String(boot.conversation.id || "");
+      const echo_id = `${Date.now()}`;
 
-			// Optimistic UI
-			const optimistic: public_message = {
-				id: echo_id,
-				content: input,
-				message_type: "incoming",
-				conversation_id: conversationId,
-				created_at: new Date().toISOString(),
-			};
-			setMessages((m) => [...m, optimistic]);
-			setInput("");
+      const optimistic: DisplayMessage = {
+        id: echo_id,
+        content,
+        message_type: "incoming",
+        conversation_id: conversationId,
+        created_at: Date.now(),
+      };
+      setMessages((m) => [...m, optimistic]);
 
-			const res = await sendMessage(
-				contactIdentifier,
-				conversationId,
-				optimistic.content || ""
-			);
-			// Replace optimistic if API returns canonical message
-			if ((res as any)?.id) {
-				const canonical = normalizePublic(res as any);
-				setMessages((m) =>
-					m.map((msg) => (msg.id === echo_id ? canonical : msg))
-				);
-			}
-		} catch (e: any) {
-			console.error(e);
-			setError(e?.message || "发送失败");
-		}
-	};
+      const res = await sendMessage(contactIdentifier, conversationId, content);
+      if ((res as any)?.id) {
+        const canonical = normalizePublic(res as any);
+        setMessages((m) => m.map((msg) => (msg.id === echo_id ? canonical : msg)));
+      }
+    } catch (e: any) {
+      console.error(e);
+      setError(e?.message || "发送失败");
+    }
+  };
+
+  const onSend = async () => {
+    if (!input.trim()) return;
+    const text = input;
+    setInput("");
+    await sendContent(text);
+  };
 
 	// Realtime via ActionCable RoomChannel
 	useEffect(() => {
@@ -281,22 +281,24 @@ export default function ChatPage() {
 	}, [boot.contact?.source_id, boot.conversation?.id]);
 
 	return (
-		<div className="mx-auto max-w-2xl w-full p-4 flex flex-col gap-4">
-			<h1 className="text-xl font-semibold">Chatwoot 客服</h1>
-			<div className="text-xs text-zinc-500">WebSocket: {wsStatus}</div>
+    <div className="mx-auto max-w-2xl w-full p-4 flex flex-col gap-4">
+      <div className="flex items-center justify-between">
+        <div className="text-2xl font-semibold">客服对话</div>
+        <div className="text-xs text-zinc-500">WS: {wsStatus}</div>
+      </div>
 
 			{loading && <div>加载中...</div>}
 			{error && <div className="text-red-600 text-sm">{error}</div>}
 
 			{!loading && (
 				<>
-					<div
-						ref={scrollerRef}
-						className="border rounded h-[60vh] overflow-y-auto p-3 bg-white dark:bg-zinc-900"
-					>
-						{messages.map((m) => (
-							<MessageItem key={m.id} msg={m} />
-						))}
+          <div
+            ref={scrollerRef}
+            className="rounded-xl h-[60vh] overflow-y-auto p-3 bg-white dark:bg-zinc-900 border border-zinc-200 shadow-sm"
+          >
+            {messages.map((m) => (
+              <MessageItem key={m.id} msg={m} onQuickReply={(t) => sendContent(t)} />
+            ))}
 						{messages.length === 0 && (
 							<div className="text-zinc-500 text-sm">
 								暂无消息，开始对话吧。
@@ -304,81 +306,79 @@ export default function ChatPage() {
 						)}
 					</div>
 
-					<div className="flex gap-2 sticky bottom-4">
-						<input
-							className="flex-1 border rounded px-3 py-2 shadow-sm focus:outline-none focus:ring-2 focus:ring-black/20"
-							value={input}
-							onChange={(e) => setInput(e.target.value)}
-							placeholder="输入消息..."
-							onKeyDown={(e) => {
-								if (e.key === "Enter" && !e.shiftKey) {
-									e.preventDefault();
-									onSend();
-								}
-							}}
-						/>
-						<button
-							className="px-4 py-2 rounded bg-black text-white disabled:opacity-50 shadow-sm"
-							onClick={onSend}
-							disabled={!input.trim()}
-						>
-							发送
-						</button>
-					</div>
+          <div className="flex gap-2 sticky bottom-4">
+            <Input
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              placeholder="输入消息..."
+              onPressEnter={(e) => {
+                e.preventDefault();
+                onSend();
+              }}
+            />
+            <Button type="primary" onClick={onSend} disabled={!input.trim()}>
+              发送
+            </Button>
+          </div>
 				</>
 			)}
 		</div>
 	);
 }
 
-function MessageItem({ msg }: { msg: DisplayMessage }) {
-	const isOutgoing = msg.message_type === "outgoing";
-	const isActivity = msg.message_type === "activity";
-	const bubbleClass = isActivity
-		? "bg-zinc-100 text-zinc-700"
-		: isOutgoing
-		? "bg-black text-white"
-		: "bg-zinc-200 text-zinc-900";
-	const alignClass = isActivity
-		? "justify-center"
-		: isOutgoing
-		? "justify-end"
-		: "justify-start";
+function MessageItem({ msg, onQuickReply }: { msg: DisplayMessage; onQuickReply?: (text: string) => void }) {
+    // In Chatwoot semantics, messages created by the visitor (client API) are "incoming"
+    const isMine = msg.message_type === "incoming";
+    const isActivity = msg.message_type === "activity";
+    const bubbleClass = isActivity
+        ? "bg-zinc-100 text-zinc-700"
+        : isMine
+        ? "bg-blue-600 text-white"
+        : "bg-gray-100 text-black";
+    const alignClass = isActivity
+        ? "justify-center"
+        : isMine
+        ? "justify-end"
+        : "justify-start";
 	return (
 		<div className={`flex ${alignClass} mb-3`}>
 			<div className={`max-w-[80%] rounded-2xl px-4 py-2 ${bubbleClass}`}>
-				<div className="text-[10px] opacity-70 mb-1">
-					{new Date(msg.created_at || Date.now()).toLocaleString()}
-				</div>
-				<MessageContent msg={msg} />
+        <div className="flex items-center gap-2 mb-1">
+          <Text type="secondary" style={{ fontSize: 12 }}>
+            {new Date(msg.created_at || Date.now()).toLocaleString()}
+          </Text>
+          {isMine ? <Tag color="blue">我</Tag> : isActivity ? <Tag>系统</Tag> : <Tag>客服</Tag>}
+        </div>
+        <MessageContent msg={msg} onQuickReply={onQuickReply} />
 			</div>
 		</div>
 	);
 }
 
-function MessageContent({ msg }: { msg: DisplayMessage }) {
+function MessageContent({ msg, onQuickReply }: { msg: DisplayMessage; onQuickReply?: (text: string) => void }) {
 	const type = msg.content_type || "text";
 	if (type === "text") {
 		return <div className="whitespace-pre-wrap leading-6">{msg.content}</div>;
 	}
 	if (type === "input_select") {
-		const opts = (msg as any)?.content_attributes?.options || [];
-		return (
-			<div>
-				<div className="mb-2">{msg.content}</div>
-				<div className="flex flex-wrap gap-2">
-					{opts.map((o: any) => (
-						<span
-							key={o.value}
-							className="px-3 py-1 rounded-full bg-white/20 border border-white/30 text-sm"
-						>
-							{o.label || o.value}
-						</span>
-					))}
-				</div>
-			</div>
-		);
-	}
+    const opts = (msg as any)?.content_attributes?.options || [];
+    return (
+      <div>
+        <div className="mb-2">{msg.content}</div>
+        <div className="flex flex-wrap gap-2">
+          {opts.map((o: any) => (
+            <button
+              key={o.value}
+              className="px-3 py-1 rounded-full bg-white/80 border border-zinc-200 text-sm hover:bg-white"
+              onClick={() => onQuickReply?.(o.value || o.label)}
+            >
+              {o.label || o.value}
+            </button>
+          ))}
+        </div>
+      </div>
+    );
+  }
 	if (type === "cards") {
 		const cards = (msg as any)?.content_attributes?.cards || [];
 		return (
@@ -398,21 +398,21 @@ function MessageContent({ msg }: { msg: DisplayMessage }) {
 						<div className="p-3">
 							<div className="font-semibold">{c.title}</div>
 							<div className="text-sm opacity-80">{c.description}</div>
-							{c.actions && (
-								<div className="mt-2 flex flex-wrap gap-2">
-									{c.actions.map((a: any, i: number) => (
-										<a
-											key={i}
-											href={a.url}
-											target="_blank"
-											rel="noreferrer"
-											className="text-blue-600 text-sm"
-										>
-											{a.label || "打开"}
-										</a>
-									))}
-								</div>
-							)}
+              {c.actions && (
+                <div className="mt-2 flex flex-wrap gap-2">
+                  {c.actions.map((a: any, i: number) => (
+                    a?.url ? (
+                      <a key={i} href={a.url} target="_blank" rel="noreferrer" className="text-blue-600 text-sm">
+                        {a.label || "打开"}
+                      </a>
+                    ) : (
+                      <button key={i} className="px-2 py-1 rounded bg-blue-50 text-blue-700 text-sm" onClick={() => onQuickReply?.(a.value || a.label)}>
+                        {a.label || "选择"}
+                      </button>
+                    )
+                  ))}
+                </div>
+              )}
 						</div>
 					</div>
 				))}
